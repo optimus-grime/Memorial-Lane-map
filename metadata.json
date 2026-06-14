@@ -1,0 +1,6 @@
+{
+  "name": "VR Map Planner",
+  "description": "Interactive map planner for VR games with grid overlay toggling, marker placement, and routing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
