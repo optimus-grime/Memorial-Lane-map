@@ -1,6 +1,6 @@
 export type ToolMode = 'select' | 'point' | 'route' | 'erase' | 'obstacle';
 
-export type MarkerType = 'default' | 'spawn' | 'loot' | 'extract';
+export type MarkerType = 'default' | 'workbench' | 'bitecoin' | 'recipe' | 'booster';
 
 export interface LocationNode {
   id: string;
@@ -15,4 +15,12 @@ export interface RouteEdge {
   startNodeId: string;
   endNodeId: string;
   pathPoints?: {x: number; y: number}[];
+}
+
+export interface LayerData {
+  id: string;
+  name: string;
+  nodes: LocationNode[];
+  edges: RouteEdge[];
+  isVisible: boolean;
 }

@@ -1,37 +1,67 @@
 import React, { useRef, useState } from 'react';
 import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch';
-import { LocationNode, RouteEdge, ToolMode } from '../types';
+import { LocationNode, RouteEdge, ToolMode, LayerData } from '../types';
 
 interface MapStageProps {
   baseImage: string | null;
   gridImage: string | null;
   gridOpacity: number;
   mode: ToolMode;
-  nodes: LocationNode[];
-  edges: RouteEdge[];
+  layers: LayerData[];
+  activeLayerId: string;
   activeRouteStart: string | null;
   snapToGrid: boolean;
   gridCols: number;
   gridRows: number;
   blockedCells: Set<string>;
+  heatmapData?: Record<string, number> | null;
   onToggleObstacle: (cellKey: string, add: boolean) => void;
   onAddNode: (x: number, y: number) => void;
   onNodeClick: (id: string, e: React.MouseEvent) => void;
   onEdgeClick: (id: string, e: React.MouseEvent) => void;
 }
 
+const generateSmoothPath = (points: {x: number, y: number}[]) => {
+  if (!points || points.length === 0) return '';
+  if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
+
+  let d = `M ${points[0].x} ${points[0].y}`;
+  
+  if (points.length === 2) {
+    return d + ` L ${points[1].x} ${points[1].y}`;
+  }
+
+  const firstMidX = (points[0].x + points[1].x) / 2;
+  const firstMidY = (points[0].y + points[1].y) / 2;
+  d += ` L ${firstMidX} ${firstMidY}`;
+
+  for (let i = 1; i < points.length - 1; i++) {
+    const p = points[i];
+    const next = points[i + 1];
+    const midX = (p.x + next.x) / 2;
+    const midY = (p.y + next.y) / 2;
+    d += ` Q ${p.x} ${p.y} ${midX} ${midY}`;
+  }
+
+  const last = points[points.length - 1];
+  d += ` L ${last.x} ${last.y}`;
+
+  return d;
+};
+
 export function MapStage({
   baseImage,
   gridImage,
   gridOpacity,
   mode,
-  nodes,
-  edges,
+  layers,
+  activeLayerId,
   activeRouteStart,
   snapToGrid,
   gridCols,
   gridRows,
   blockedCells,
+  heatmapData,
   onToggleObstacle,
   onAddNode,
   onNodeClick,
@@ -39,6 +69,9 @@ export function MapStage({
 }: MapStageProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
+
+  const activeLayer = layers.find(l => l.id === activeLayerId) || layers[0];
+  const nodes = activeLayer.nodes;
   
   const isPaintingRef = useRef(false);
   const paintModeRef = useRef<'add'|'remove'>('add');
@@ -201,15 +234,48 @@ export function MapStage({
                 />
               )}
 
+              {/* Heatmap Overlay */}
+              {heatmapData && (
+                <div className="absolute inset-0 pointer-events-none z-0">
+                  {Object.entries(heatmapData).map(([cellKey, score]) => {
+                    const [c, r] = cellKey.split(',').map(Number);
+                    const stepX = 100 / gridCols;
+                    const stepY = 100 / gridRows;
+
+                    // Color mapping: 1.0 = optimal (green), 0.0 = worst (red)
+                    // HSL mapping: Hue 0 (red) to 120 (green)
+                    const hue = score * 120;
+
+                    return (
+                      <div
+                        key={`heat-${cellKey}`}
+                        className="absolute"
+                        style={{
+                          left: `${c * stepX}%`,
+                          top: `${r * stepY}%`,
+                          width: `${stepX}%`,
+                          height: `${stepY}%`,
+                          backgroundColor: `hsla(${hue}, 100%, 50%, 0.45)`,
+                          border: `1px solid hsla(${hue}, 100%, 50%, 0.1)`
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+
               {/* Blocked Cells Overlay */}
-              <div className="absolute inset-0 pointer-events-none z-0">
+              <div 
+                className="absolute inset-0 pointer-events-none z-0 transition-opacity duration-150 ease-out"
+                style={{ opacity: gridOpacity / 100 }}
+              >
                 {Array.from(blockedCells).map(cellStr => {
                   const [c, r] = cellStr.split(',').map(Number);
                   const stepX = 100 / gridCols;
                   const stepY = 100 / gridRows;
                   return (
                     <div
-                      key={cellStr}
+                      key={`b-${cellStr}`}
                       className="absolute bg-red-500/30 border border-red-500/50 backdrop-blur-sm shadow-[0_0_15px_rgba(239,68,68,0.2)]"
                       style={{ left: `${c * stepX}%`, top: `${r * stepY}%`, width: `${stepX}%`, height: `${stepY}%` }}
                     />
@@ -218,79 +284,156 @@ export function MapStage({
               </div>
 
               {/* SVG Overlay for Routes */}
-              <svg className="absolute inset-0 w-full h-full pointer-events-none overflow-visible">
-                {edges.map(edge => {
-                  const start = nodes.find(n => n.id === edge.startNodeId);
-                  const end = nodes.find(n => n.id === edge.endNodeId);
-                  if (!start || !end) return null;
+              <svg 
+                className="absolute inset-0 w-full h-full pointer-events-none overflow-visible"
+                viewBox="0 0 100 100"
+                preserveAspectRatio="none"
+              >
+                <defs>
+                  <filter id="routeGlow" x="-20%" y="-20%" width="140%" height="140%">
+                    <feGaussianBlur stdDeviation="1.5" result="blur" />
+                    <feComposite in="SourceGraphic" in2="blur" operator="over" />
+                  </filter>
+                  <linearGradient id="routeGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stopColor="#10b981" />
+                    <stop offset="50%" stopColor="#8b5cf6" />
+                    <stop offset="100%" stopColor="#3b82f6" />
+                  </linearGradient>
                   
-                  const isErase = mode === 'erase';
-                  const strokeCol = isErase ? "#ef4444" : "#10b981";
-                  const commonProps = {
-                    stroke: strokeCol,
-                    strokeWidth: isErase ? "6" : "3",
-                    strokeLinecap: "round" as const,
-                    strokeLinejoin: "round" as const,
-                    className: `transition-colors duration-200 ${isErase ? 'pointer-events-auto cursor-pointer hover:strokeWidth-4 hover:stroke-red-500' : ''}`,
-                    onClick: (e: React.MouseEvent) => { if (isErase) { e.stopPropagation(); onEdgeClick(edge.id, e); } }
-                  };
+                  <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="2.5" markerHeight="2.5" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+                    <path d="M 0 0 L 10 5 L 0 10 z" fill="#3b82f6" />
+                  </marker>
+                  <marker id="arrow-erase" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="2.5" markerHeight="2.5" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+                    <path d="M 0 0 L 10 5 L 0 10 z" fill="#ef4444" />
+                  </marker>
+                </defs>
 
-                  if (edge.pathPoints && edge.pathPoints.length > 1) {
-                    return (
-                      <g key={edge.id}>
-                        {edge.pathPoints.map((p, i, arr) => {
-                          if (i === 0) return null;
-                          const prev = arr[i - 1];
-                          return <line key={`${edge.id}-${i}`} x1={`${prev.x}%`} y1={`${prev.y}%`} x2={`${p.x}%`} y2={`${p.y}%`} {...commonProps} />;
-                        })}
-                      </g>
-                    );
-                  }
-
+                {layers.filter(layer => layer.isVisible).map((layer, layerIndex) => {
+                  const isActiveLayer = layer.id === activeLayerId;
+                  const layerOpacity = isActiveLayer ? 1 : 0.4;
+                  
                   return (
-                    <line key={edge.id} x1={`${start.x}%`} y1={`${start.y}%`} x2={`${end.x}%`} y2={`${end.y}%`} {...commonProps} />
+                    <g key={layer.id} opacity={layerOpacity}>
+                      {layer.edges.map(edge => {
+                        const start = layer.nodes.find(n => n.id === edge.startNodeId);
+                        const end = layer.nodes.find(n => n.id === edge.endNodeId);
+                        if (!start || !end) return null;
+                        
+                        const isErase = mode === 'erase' && isActiveLayer;
+                        const allowInteraction = isActiveLayer;
+                        const commonProps = {
+                          stroke: isErase ? "#ef4444" : "url(#routeGradient)",
+                          strokeWidth: isErase ? "4" : "3.5",
+                          strokeLinecap: "round" as const,
+                          strokeLinejoin: "round" as const,
+                          fill: "none",
+                          filter: isErase ? "none" : "url(#routeGlow)",
+                          markerEnd: isErase ? "url(#arrow-erase)" : "url(#arrow)",
+                          vectorEffect: "non-scaling-stroke",
+                          className: `transition-all duration-300 ${isErase ? 'pointer-events-auto cursor-pointer hover:strokeWidth-[6px] hover:stroke-red-500 hover:drop-shadow-[0_0_8px_rgba(239,68,68,0.8)]' : ''}`,
+                          onClick: (e: React.MouseEvent) => { if (isErase && allowInteraction) { e.stopPropagation(); onEdgeClick(edge.id, e); } }
+                        };
+
+                        if (edge.pathPoints && edge.pathPoints.length > 1) {
+                          return (
+                            <g key={edge.id}>
+                              {/* Invisible thicker path for hit detection when erasing */}
+                              {isErase && (
+                                <path 
+                                  d={generateSmoothPath(edge.pathPoints)} 
+                                  stroke="transparent" 
+                                  strokeWidth="16" 
+                                  fill="none" 
+                                  vectorEffect="non-scaling-stroke"
+                                  className="pointer-events-auto cursor-pointer"
+                                  onClick={(e) => { e.stopPropagation(); onEdgeClick(edge.id, e); }}
+                                />
+                              )}
+                              <path 
+                                d={generateSmoothPath(edge.pathPoints)} 
+                                {...commonProps} 
+                              />
+                            </g>
+                          );
+                        }
+
+                        return (
+                          <g key={edge.id}>
+                            {isErase && (
+                              <path 
+                                d={`M ${start.x} ${start.y} L ${end.x} ${end.y}`}
+                                stroke="transparent" 
+                                strokeWidth="16" 
+                                fill="none" 
+                                vectorEffect="non-scaling-stroke"
+                                className="pointer-events-auto cursor-pointer"
+                                onClick={(e) => { e.stopPropagation(); onEdgeClick(edge.id, e); }}
+                              />
+                            )}
+                            <path 
+                              d={`M ${start.x} ${start.y} L ${end.x} ${end.y}`}
+                              {...commonProps} 
+                            />
+                          </g>
+                        );
+                      })}
+                    </g>
                   );
                 })}
 
                 {/* Active drawing route */}
                 {activeStartNode && mousePos && (
-                  <line
-                    x1={`${activeStartNode.x}%`} y1={`${activeStartNode.y}%`}
-                    x2={`${mousePos.x}%`} y2={`${mousePos.y}%`}
-                    stroke="#10b981"
-                    strokeWidth="2"
-                    strokeDasharray="6 6"
-                    className="opacity-70 animate-pulse"
+                  <path
+                    d={`M ${activeStartNode.x} ${activeStartNode.y} L ${mousePos.x} ${mousePos.y}`}
+                    stroke="url(#routeGradient)"
+                    strokeWidth="3.5"
+                    strokeDasharray="8 6"
+                    fill="none"
+                    filter="url(#routeGlow)"
+                    vectorEffect="non-scaling-stroke"
+                    className="opacity-80 animate-pulse"
                   />
                 )}
               </svg>
 
               {/* HTML Nodes overlay */}
-              {nodes.map(n => {
-                const isStartNode = activeRouteStart === n.id;
-                const typeColor = n.type === 'spawn' ? 'bg-green-500' : 
-                                  n.type === 'loot' ? 'bg-purple-500' :
-                                  n.type === 'extract' ? 'bg-red-500' : 'bg-white';
+              {layers.filter(layer => layer.isVisible).map(layer => {
+                const isActiveLayer = layer.id === activeLayerId;
+                const layerOpacity = isActiveLayer ? 1 : 0.4;
+                
                 return (
-                  <div
-                    key={n.id}
-                    className="absolute transform -translate-x-1/2 -translate-y-1/2 flex flex-col items-center gap-1.5 group z-10"
-                    style={{ left: `${n.x}%`, top: `${n.y}%` }}
-                  >
-                    <button
-                      type="button"
-                      onClick={(e) => { e.stopPropagation(); onNodeClick(n.id, e); }}
-                      className={`w-3.5 h-3.5 rounded-full border-[2.5px] border-[#0a0a0a] shadow-lg shadow-black/40 transition-all outline-none focus:outline-none ring-0
-                        ${mode === 'erase' ? 'bg-red-500 cursor-pointer pointer-events-auto hover:bg-red-400 hover:scale-125' :
-                          isStartNode ? 'bg-amber-400 scale-[1.3] pointer-events-auto ring-2 ring-amber-400/30' :
-                          mode === 'route' ? 'bg-blue-400 cursor-pointer pointer-events-auto hover:bg-amber-300 hover:scale-[1.2]' :
-                          `${typeColor} pointer-events-auto ${mode === 'select' ? 'hover:scale-110 cursor-pointer' : 'cursor-default'}`
-                        }
-                      `}
-                    />
-                    <span className="px-2 py-0.5 bg-[#0a0a0a]/90 text-slate-300 text-[10px] font-mono tracking-wider rounded border border-slate-800 shadow-md backdrop-blur-md opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none translate-y-1 group-hover:translate-y-0">
-                      {n.label}
-                    </span>
+                  <div key={layer.id} className="absolute inset-0 pointer-events-none" style={{ opacity: layerOpacity }}>
+                    {layer.nodes.map(n => {
+                      const isStartNode = activeRouteStart === n.id && isActiveLayer;
+                      const allowInteraction = isActiveLayer;
+                      
+                      const typeColor = n.type === 'workbench' ? 'bg-blue-500' : 
+                                        n.type === 'bitecoin' ? 'bg-amber-500' :
+                                        n.type === 'recipe' ? 'bg-purple-500' :
+                                        n.type === 'booster' ? 'bg-green-400' : 'bg-slate-300';
+                      return (
+                        <div
+                          key={n.id}
+                          className={`absolute transform -translate-x-1/2 -translate-y-1/2 flex flex-col items-center gap-1.5 group z-10 ${allowInteraction ? 'pointer-events-auto' : ''}`}
+                          style={{ left: `${n.x}%`, top: `${n.y}%` }}
+                        >
+                          <button
+                            type="button"
+                            onClick={(e) => { if (allowInteraction) { e.stopPropagation(); onNodeClick(n.id, e); } }}
+                            className={`w-3.5 h-3.5 rounded-full border-[2.5px] border-[#0a0a0a] shadow-lg shadow-black/40 transition-all outline-none focus:outline-none ring-0
+                              ${mode === 'erase' && allowInteraction ? 'bg-red-500 cursor-pointer pointer-events-auto hover:bg-red-400 hover:scale-125' :
+                                isStartNode ? 'bg-amber-400 scale-[1.3] pointer-events-auto ring-2 ring-amber-400/30' :
+                                mode === 'route' && allowInteraction ? 'bg-blue-400 cursor-pointer pointer-events-auto hover:bg-amber-300 hover:scale-[1.2]' :
+                                `${typeColor} ${allowInteraction ? (mode === 'select' ? 'hover:scale-110 cursor-pointer' : 'cursor-default') : ''}`
+                              }
+                            `}
+                          />
+                          <span className="px-2 py-0.5 bg-[#0a0a0a]/90 text-slate-300 text-[10px] font-mono tracking-wider rounded border border-slate-800 shadow-md backdrop-blur-md opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none translate-y-1 group-hover:translate-y-0">
+                            {n.label}
+                          </span>
+                        </div>
+                      );
+                    })}
                   </div>
                 );
               })}
